@@ -295,7 +295,7 @@ def train(args):
 
     # Create tf.data.Dataset
     dataset = tf.data.Dataset.from_tensor_slices((x, c, x_len, c_len))
-    dataset = dataset.shuffle(buffer_size=len(x)).batch(args.batch_size)
+    dataset = dataset.shuffle(buffer_size=len(x)).batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
 
     # Initialize model, optimizer, and checkpoint manager
     model = HandwritingRNN(
@@ -362,7 +362,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='data/processed_latex', help='Directory with processed data.')
     parser.add_argument('--checkpoint_dir', type=str, default='tf_ckpts', help='Directory to save checkpoints.')
     parser.add_argument('--model_weights_path', type=str, default='handwriting_model.weights.h5', help='Path to save final model weights.')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training.')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training.')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs.')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='Optimizer learning rate.')
     parser.add_argument('--save_every', type=int, default=1, help='Save checkpoint every N epochs.')
