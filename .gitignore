@@ -1,3 +1,6 @@
 *.h5
 mathwriting-2024-excerpt
 data/mathwriting-2024-full
+data/processed_latex
+__pycache__/
+*.pyc
