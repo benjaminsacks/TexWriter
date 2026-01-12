@@ -336,16 +336,27 @@ def train(args):
 
         grads = tape.gradient(loss, model.trainable_variables)
         # Apply gradient clipping to prevent exploding gradients
-        grads, _ = tf.clip_by_global_norm(grads, 10.0)
+        grads, _ = tf.clip_by_global_norm(grads, 5.0)
         optimizer.apply_gradients(zip(grads, model.trainable_variables))
         return loss
 
+    # TensorBoard setup
+    arg_log_dir = getattr(args, 'log_dir', 'logs')  # Default to 'logs' if not provided
+    summary_writer = tf.summary.create_file_writer(arg_log_dir)
+
     # Training loop
     tqdm.write("Starting training...")
+    global_step = 0
     for epoch in range(args.epochs):
         with tqdm(total=len(x) // args.batch_size, desc=f"Epoch {epoch+1}/{args.epochs}") as pbar:
             for batch in dataset:
                 loss = train_step(batch)
+                
+                # Log to TensorBoard
+                with summary_writer.as_default():
+                    tf.summary.scalar('loss', loss, step=global_step)
+                global_step += 1
+
                 pbar.update(1)
                 pbar.set_postfix({'loss': f'{loss.numpy():.4f}'})
 
@@ -364,8 +375,9 @@ if __name__ == '__main__':
     parser.add_argument('--model_weights_path', type=str, default='handwriting_model.weights.h5', help='Path to save final model weights.')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training.')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs.')
-    parser.add_argument('--learning_rate', type=float, default=3e-3, help='Optimizer learning rate.')
+    parser.add_argument('--learning_rate', type=float, default=5e-4, help='Optimizer learning rate.')
     parser.add_argument('--save_every', type=int, default=1, help='Save checkpoint every N epochs.')
+    parser.add_argument('--log_dir', type=str, default='logs', help='Directory for TensorBoard logs.')
     # Model Hyperparameters
     parser.add_argument('--lstm_size', type=int, default=400, help='Size of LSTM layers.')
     parser.add_argument('--output_mixture_components', type=int, default=20, help='Number of GMM output components.')
