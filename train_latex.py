@@ -155,8 +155,8 @@ class HandwritingRNN(tf.keras.Model):
         pi = tf.nn.softmax(pi, axis=-1)
 
         # Apply activations to sigmas and rho
-        sigma1 = tf.exp(sigma1)
-        sigma2 = tf.exp(sigma2)
+        sigma1 = tf.exp(sigma1) + 1e-4
+        sigma2 = tf.exp(sigma2) + 1e-4
         rho = tf.tanh(rho)
 
         # Calculate the bivariate Gaussian distribution
@@ -304,7 +304,17 @@ def train(args):
         attention_mixture_components=args.attention_mixture_components,
         vocab_size=vocab_size
     )
-    optimizer = tf.keras.optimizers.Adam(learning_rate=args.learning_rate)
+
+    # Learning Rate Schedule
+    # Decay every 5 epochs
+    steps_per_epoch = len(x) // args.batch_size
+    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate=args.learning_rate,
+        decay_steps=steps_per_epoch * 5,
+        decay_rate=0.9,
+        staircase=True
+    )
+    optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
     # Build the model by passing a sample batch
     sample_x, sample_c, sample_x_len, sample_c_len = next(iter(dataset))
