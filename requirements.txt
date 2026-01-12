@@ -2,4 +2,5 @@ tensorflow
 numpy
 matplotlib
 scipy>=1.7.0
+h5py>=3.1.0
 tqdm
