@@ -1,98 +1,62 @@
 """
 Prepares handwriting data for LaTeX synthesis training.
 
-This script processes a dataset of InkML files and their corresponding LaTeX labels
-to create NumPy arrays suitable for training a sequence-to-sequence model.
+This script processes the MathWriting dataset (InkML files) to create NumPy arrays 
+suitable for training a sequence-to-sequence model.
+
+It directly reads labels from the InkML files in the specified splits (e.g., train, valid).
 
 The pipeline is as follows:
-1.  Load labels from a .jsonl file that maps InkML filenames to LaTeX strings.
-2.  Create and save a character map (a dictionary mapping each character to an integer).
-3.  For each InkML file:
-    a. Parse the XML to extract the raw stroke coordinates.
-    b. Process the strokes: align, denoise, convert to relative offsets, and normalize.
-    c. Encode the LaTeX label using the character map.
-4.  Pad all sequences to a fixed maximum length.
-5.  Save the processed strokes (x), stroke lengths (x_len), encoded characters (c),
-    and character lengths (c_len) as .npy files.
+1.  Iterate through .inkml files in the specified splits.
+2.  Parse each file to extract:
+    - The LaTeX label (preferring 'normalizedLabel', then 'label').
+    - The raw stroke coordinates.
+3.  Process the strokes: align, denoise, convert to relative offsets, and normalize.
+4.  Build a character map from all found labels.
+5.  Encode labels and pad sequences.
+6.  Save the processed data (x, x_len, c, c_len) and char_map.
 """
 import os
 import sys
 import json
 import argparse
+import glob
+import multiprocessing
 from xml.etree import ElementTree
 import numpy as np
 from tqdm import tqdm
 
-# Add the subdirectory to the Python path to allow direct import
-# of modules from the original handwriting-synthesis project.
-sys.path.append(os.path.join(os.getcwd(), 'handwriting-synthesis-master'))
 import drawing
 
 # --- Helper Functions ---
 
-def load_labels(labels_file, data_dir):
+def get_drawing_and_label(filename):
     """
-    Loads labels from a .jsonl file.
-
-    Args:
-        labels_file (str): Path to the .jsonl file.
-        data_dir (str): The root directory of the dataset.
-
-    Returns:
-        list: A list of tuples, where each tuple contains an absolute file path
-              to an .inkml file and its corresponding LaTeX label.
-    """
-    labels = []
-    print(f"Loading labels from {labels_file}...")
-    with open(labels_file, 'r') as f:
-        for line in f:
-            entry = json.loads(line)
-            # Make the file path absolute
-            full_path = os.path.join(data_dir, entry['filename'])
-            if os.path.exists(full_path):
-                labels.append((full_path, entry['label']))
-    if not labels:
-        raise ValueError(f"No valid file paths found from {labels_file}. Check paths and `data_dir`.")
-    return labels
-
-def create_char_map(transcriptions):
-    """Creates a character-to-index mapping from a list of transcriptions."""
-    all_chars = set(''.join(transcriptions))
-    char_map = {char: i for i, char in enumerate(sorted(list(all_chars)))}
-    # Ensure a padding character exists for bucketing.
-    if ' ' not in char_map:
-        char_map[' '] = len(char_map)
-    return char_map
-
-def get_stroke_sequence(filename):
-    """
-    Parses an InkML file to extract, process, and normalize a stroke sequence.
-
-    The processing steps, adapted from the original `handwriting-synthesis`
-    project, are:
-    1.  Parse XML and extract (x, y) coordinates for each stroke.
-    2.  Combine all strokes into a single sequence, adding an end-of-stroke flag.
-    3.  Align the drawing to the center.
-    4.  Denoise the strokes by removing small jitter.
-    5.  Convert absolute coordinates to relative offsets (delta x, delta y).
-    6.  Truncate to a maximum length.
-    7.  Normalize the offsets to have zero mean and unit variance.
-
-    Args:
-        filename (str): Path to the .inkml file.
-
-    Returns:
-        np.ndarray: A processed stroke sequence of shape (N, 3), where each
-                    row is [dx, dy, end_of_stroke_flag].
+    Parses an InkML file to extract the label and processed stroke sequence.
     """
     try:
         tree = ElementTree.parse(filename).getroot()
         namespace = {'inkml': 'http://www.w3.org/2003/InkML'}
-        traces = tree.findall('inkml:trace', namespace)
     except ElementTree.ParseError as e:
         print(f"Warning: Could not parse {filename}: {e}")
-        return np.array([])
+        return None, None
 
+    # --- Extract Label ---
+    # Look for normalizedLabel first, then label
+    label = None
+    for annotation in tree.findall('inkml:annotation', namespace):
+        atype = annotation.get('type')
+        if atype == 'normalizedLabel':
+            label = annotation.text
+            break
+        elif atype == 'label' and label is None:
+            label = annotation.text
+    
+    if label is None:
+        return None, None
+
+    # --- Extract Strokes ---
+    traces = tree.findall('inkml:trace', namespace)
     coords = []
     for trace in traces:
         points = (trace.text or '').strip().split(',')
@@ -100,40 +64,92 @@ def get_stroke_sequence(filename):
         for point_str in points:
             parts = point_str.strip().split()
             if len(parts) >= 2:
-                # We use x and -y because y-coordinates are typically inverted in image space.
+                # We use x and -y because y-coordinates are typically inverted in image space
                 stroke.append([float(parts[0]), -1 * float(parts[1])])
         
         if not stroke:
             continue
 
-        # Add the end-of-stroke flag (0 for intermediate points, 1 for the last point).
+        # Add the end-of-stroke flag (0 for intermediate points, 1 for the last point)
         for i, point in enumerate(stroke):
             coords.append([point[0], point[1], int(i == len(stroke) - 1)])
 
     if not coords:
-        return np.array([])
+        return None, None
 
-    # Convert to numpy and apply processing functions from drawing.py
+    # --- Process Strokes (using drawing.py) ---
     coords = np.array(coords)
     coords = drawing.align(coords)
     coords = drawing.denoise(coords)
     offsets = drawing.coords_to_offsets(coords)
     offsets = offsets[:drawing.MAX_STROKE_LEN]
     offsets = drawing.normalize(offsets)
-    return offsets
+
+    return offsets, label
+
+def create_char_map(transcriptions):
+    """Creates a character-to-index mapping from a list of transcriptions."""
+    all_chars = set(''.join(transcriptions))
+    # Sort for determinism
+    char_map = {char: i for i, char in enumerate(sorted(list(all_chars)))}
+    # Ensure a padding character exists (usually space or 0)
+    # We use the existing logic where ' ' is mapped if present, or added.
+    # However, for padding, we often want index 0 or a specific index.
+    # The training script uses padding values from this map.
+    if ' ' not in char_map:
+        char_map[' '] = len(char_map)
+    return char_map
 
 def main(args):
     """Main function to run the data preparation pipeline."""
-    # 1. Load labels
-    try:
-        labels = load_labels(args.labels_file, args.data_dir)
-        print(f"Found {len(labels)} samples.")
-    except (FileNotFoundError, ValueError) as e:
-        print(f"Error: {e}")
+    
+    # 1. Collect Data
+    splits = args.splits.split(',')
+    all_data = [] # List of tuples: (offsets, label, filename)
+
+    print(f"Scanning splits: {splits} in {args.data_dir}...")
+    
+    valid_files = []
+    for split in splits:
+        split_dir = os.path.join(args.data_dir, split)
+        if not os.path.isdir(split_dir):
+            print(f"Warning: Split directory not found: {split_dir}")
+            continue
+        
+        # Find all .inkml files
+        files = glob.glob(os.path.join(split_dir, '*.inkml'))
+        valid_files.extend(files)
+
+    print(f"Found {len(valid_files)} InkML files. Processing...")
+    
+    # Process files (Parsing XML and calculating strokes)
+    # Use multiprocessing to speed up processing
+    num_processes = multiprocessing.cpu_count()
+    print(f"Processing with {num_processes} processes...")
+    
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        # returns list of (offsets, label) or (None, None)
+        results = list(tqdm(pool.imap(get_drawing_and_label, valid_files), total=len(valid_files)))
+    
+    # Filter out None results and invalid strokes
+    for offsets, label in results:
+        if offsets is None or label is None:
+            continue
+        
+        # Basic validity check (removes outlier strokes)
+        if offsets.shape[0] == 0 or np.any(np.linalg.norm(offsets[:, :2], axis=1) > 60):
+            continue
+            
+        all_data.append((offsets, label))
+
+    print(f"Successfully processed {len(all_data)} valid samples.")
+
+    if not all_data:
+        print("No valid data found. Exiting.")
         sys.exit(1)
 
     # 2. Create character map
-    transcriptions = [label for _, label in labels]
+    transcriptions = [item[1] for item in all_data]
     char_map = create_char_map(transcriptions)
     
     os.makedirs(args.output_dir, exist_ok=True)
@@ -142,47 +158,29 @@ def main(args):
     with open(char_map_path, 'w') as f:
         json.dump(char_map, f, indent=2)
 
-    # 3. Initialize numpy arrays for storing processed data
-    num_samples = len(labels)
+    # 3. Create NumPy arrays
+    num_samples = len(all_data)
+    
+    # Initialize arrays
     x = np.zeros([num_samples, drawing.MAX_STROKE_LEN, 3], dtype=np.float32)
     x_len = np.zeros([num_samples], dtype=np.int16)
-    c = np.full([num_samples, drawing.MAX_CHAR_LEN], fill_value=char_map[' '], dtype=np.int8)
+    c = np.full([num_samples, drawing.MAX_CHAR_LEN], fill_value=char_map.get(' ', 0), dtype=np.int8)
     c_len = np.zeros([num_samples], dtype=np.int8)
     
-    valid_indices = []
-
-    print("Processing strokes and transcriptions...")
-    for i, (stroke_fname, transcription) in enumerate(tqdm(labels, total=num_samples)):
-        # Process strokes
-        x_i = get_stroke_sequence(stroke_fname)
-        if x_i.shape[0] == 0:
-            continue
-
-        # Basic validity check from the original project (removes outlier strokes)
-        if np.any(np.linalg.norm(x_i[:, :2], axis=1) > 60):
-            continue
-
-        # Process and encode transcription
-        encoded_c = [char_map[char] for char in transcription if char in char_map]
+    print("Encoding character sequences and building arrays...")
+    for i, (offsets, label) in enumerate(tqdm(all_data)):
+        # Fill x (strokes)
+        x[i, :len(offsets), :] = offsets
+        x_len[i] = len(offsets)
+        
+        # Fill c (chars)
+        encoded_c = [char_map[char] for char in label if char in char_map]
         encoded_c = encoded_c[:drawing.MAX_CHAR_LEN]
-
-        # Store in numpy arrays
-        x[i, :len(x_i), :] = x_i
-        x_len[i] = len(x_i)
+        
         c[i, :len(encoded_c)] = encoded_c
         c_len[i] = len(encoded_c)
-        
-        valid_indices.append(i)
-            
-    print(f"Successfully processed {len(valid_indices)} valid samples.")
 
-    # Filter out any samples that were skipped or failed processing
-    x = x[valid_indices]
-    x_len = x_len[valid_indices]
-    c = c[valid_indices]
-    c_len = c_len[valid_indices]
-
-    # 5. Save the final arrays
+    # 4. Save arrays
     print(f"Saving processed data to {args.output_dir}...")
     np.save(os.path.join(args.output_dir, 'x.npy'), x)
     np.save(os.path.join(args.output_dir, 'x_len.npy'), x_len)
@@ -198,13 +196,13 @@ if __name__ == '__main__':
         '--data_dir',
         type=str,
         default='mathwriting-2024-excerpt',
-        help='Root directory of the dataset.'
+        help='Root directory of the dataset (containing train/valid subfolders).'
     )
     parser.add_argument(
-        '--labels_file',
+        '--splits',
         type=str,
-        default='mathwriting-2024-excerpt/symbols.jsonl',
-        help='Path to the .jsonl file containing file paths and labels.'
+        default='train,valid',
+        help='Comma-separated list of subdirectories to include (e.g., "train,valid").'
     )
     parser.add_argument(
         '--output_dir',

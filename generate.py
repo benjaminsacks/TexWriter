@@ -16,7 +16,7 @@ import tensorflow as tf
 
 # Add the subdirectory to the Python path to allow direct import
 # of modules from the original handwriting-synthesis project.
-sys.path.append(os.path.join(os.getcwd(), 'handwriting-synthesis-master'))
+# sys.path.append(os.path.join(os.getcwd(), 'handwriting-synthesis-master'))
 import drawing
 
 # Import the model definition.

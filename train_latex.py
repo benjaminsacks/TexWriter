@@ -22,7 +22,10 @@ import tensorflow as tf
 from tqdm import tqdm
 
 # Add the handwriting-synthesis-master directory to the Python path
-sys.path.append(os.path.join(os.getcwd(), 'handwriting-synthesis-master'))
+# sys.path.append(os.path.join(os.getcwd(), 'handwriting-synthesis-master'))
+
+# Set the GPU to use
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 from tf2_rnn_cell import KerasLSTMAttentionCell
 import drawing
