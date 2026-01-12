@@ -364,7 +364,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_weights_path', type=str, default='handwriting_model.weights.h5', help='Path to save final model weights.')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training.')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs.')
-    parser.add_argument('--learning_rate', type=float, default=1e-3, help='Optimizer learning rate.')
+    parser.add_argument('--learning_rate', type=float, default=3e-3, help='Optimizer learning rate.')
     parser.add_argument('--save_every', type=int, default=1, help='Save checkpoint every N epochs.')
     # Model Hyperparameters
     parser.add_argument('--lstm_size', type=int, default=400, help='Size of LSTM layers.')
