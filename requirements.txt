@@ -1,5 +1,5 @@
-tensorflow[and-cuda]
-numpy==1.24.3
+tensorflow[and-cuda]>=2.15.0
+numpy>=1.23.5
 matplotlib
 scipy>=1.7.0
 h5py>=3.1.0
