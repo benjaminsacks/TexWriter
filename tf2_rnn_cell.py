@@ -29,7 +29,7 @@ class KerasLSTMAttentionCell(tf.keras.layers.Layer):
     - `phi`: The attention weights applied to the input characters.
     """
 
-    def __init__(self, lstm_size, num_attn_mixture_components, vocab_size, **kwargs):
+    def __init__(self, lstm_size, num_attn_mixture_components, vocab_size, recurrent_dropout=0.0, **kwargs):
         """
         Initializes the cell and its internal layers.
 
@@ -38,16 +38,17 @@ class KerasLSTMAttentionCell(tf.keras.layers.Layer):
             num_attn_mixture_components (int): The number of Gaussian mixtures
                 to use for the attention mechanism.
             vocab_size (int): The number of unique characters in the vocabulary.
+            recurrent_dropout (float): Dropout rate for recurrent connections.
         """
         super().__init__(**kwargs)
         self.lstm_size = lstm_size
         self.num_attn_mixture_components = num_attn_mixture_components
         self.vocab_size = vocab_size
 
-        # Internal layers of the cell
-        self.lstm1 = tf.keras.layers.LSTMCell(self.lstm_size, name='lstm_cell_1')
-        self.lstm2 = tf.keras.layers.LSTMCell(self.lstm_size, name='lstm_cell_2')
-        self.lstm3 = tf.keras.layers.LSTMCell(self.lstm_size, name='lstm_cell_3')
+        # Internal layers of the cell with recurrent dropout
+        self.lstm1 = tf.keras.layers.LSTMCell(self.lstm_size, recurrent_dropout=recurrent_dropout, name='lstm_cell_1')
+        self.lstm2 = tf.keras.layers.LSTMCell(self.lstm_size, recurrent_dropout=recurrent_dropout, name='lstm_cell_2')
+        self.lstm3 = tf.keras.layers.LSTMCell(self.lstm_size, recurrent_dropout=recurrent_dropout, name='lstm_cell_3')
         # Dense layer to predict attention parameters (alpha, beta, kappa)
         self.attention_layer = tf.keras.layers.Dense(
             3 * self.num_attn_mixture_components, name='attention_params'

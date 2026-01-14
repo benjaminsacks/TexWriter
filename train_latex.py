@@ -39,7 +39,7 @@ class HandwritingRNN(tf.keras.Model):
     A sequence-to-sequence model for handwriting generation, adapted for TF2.
     """
     def __init__(self, lstm_size=400, output_mixture_components=20,
-                 attention_mixture_components=10, vocab_size=80, **kwargs):
+                 attention_mixture_components=10, vocab_size=80, recurrent_dropout=0.0, **kwargs):
         super().__init__(**kwargs)
         self.lstm_size = lstm_size
         self.output_mixture_components = output_mixture_components
@@ -50,7 +50,8 @@ class HandwritingRNN(tf.keras.Model):
         self.cell = KerasLSTMAttentionCell(
             lstm_size=self.lstm_size,
             num_attn_mixture_components=self.attention_mixture_components,
-            vocab_size=self.vocab_size
+            vocab_size=self.vocab_size,
+            recurrent_dropout=recurrent_dropout
         )
 
         # Dense layer to predict the parameters of the MDN output
@@ -156,9 +157,9 @@ class HandwritingRNN(tf.keras.Model):
         pi = tf.nn.softmax(pi, axis=-1)
 
         # Apply activations to sigmas and rho
-        sigma1 = tf.exp(sigma1) + 1e-4
-        sigma2 = tf.exp(sigma2) + 1e-4
-        rho = 0.99 * tf.tanh(rho)
+        sigma1 = tf.exp(sigma1) + 1e-2
+        sigma2 = tf.exp(sigma2) + 1e-2
+        rho = 0.95 * tf.tanh(rho)
 
         # Calculate the bivariate Gaussian distribution
         x_data, y_data, eos_data = tf.split(y_true, 3, axis=-1)
@@ -306,7 +307,8 @@ def train(args):
         lstm_size=args.lstm_size,
         output_mixture_components=args.output_mixture_components,
         attention_mixture_components=args.attention_mixture_components,
-        vocab_size=vocab_size
+        vocab_size=vocab_size,
+        recurrent_dropout=0.1
     )
 
     # Learning Rate Schedule with Warmup
@@ -411,8 +413,8 @@ def train(args):
                         axis=-1
                     )
                     # Recalculate activations to match loss logic for logging
-                    sigma1 = tf.exp(sigma1) + 1e-4
-                    rho = 0.99 * tf.tanh(rho)
+                    sigma1 = tf.exp(sigma1) + 1e-2
+                    rho = 0.95 * tf.tanh(rho)
                     
                     tf.summary.scalar('stats/sigma_min', tf.reduce_min(sigma1), step=global_step)
                     tf.summary.scalar('stats/rho_max', tf.reduce_max(tf.abs(rho)), step=global_step)
