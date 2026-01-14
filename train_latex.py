@@ -389,10 +389,10 @@ def train(args):
         x_batch, c_batch, x_len_batch, c_len_batch = batch
 
         # --- OPTIMIZATION: Trim batch to max length ---
-        max_seq_len = tf.reduce_max(x_len_batch)
+        max_seq_len = tf.cast(tf.reduce_max(x_len_batch), tf.int32)
         x_batch = x_batch[:, :max_seq_len, :]
 
-        max_char_len = tf.reduce_max(c_len_batch)
+        max_char_len = tf.cast(tf.reduce_max(c_len_batch), tf.int32)
         c_batch = c_batch[:, :max_char_len]
         # -----------------------------------------------
 
