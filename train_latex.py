@@ -309,14 +309,37 @@ def train(args):
         vocab_size=vocab_size
     )
 
-    # Learning Rate Schedule
-    # Decay every 5 epochs
+    # Learning Rate Schedule with Warmup
+    # Warmup for 1 epoch, then decay
     steps_per_epoch = len(x) // args.batch_size
-    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+    warmup_steps = steps_per_epoch
+    
+    class WarmUpExponentialDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
+        def __init__(self, initial_learning_rate, warmup_steps, decay_steps, decay_rate):
+            super().__init__()
+            self.initial_learning_rate = initial_learning_rate
+            self.warmup_steps = warmup_steps
+            self.decay_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+                initial_learning_rate, decay_steps, decay_rate, staircase=True
+            )
+
+        def __call__(self, step):
+             # Linear warmup
+             global_step_float = tf.cast(step, tf.float32)
+             warmup_steps_float = tf.cast(self.warmup_steps, tf.float32)
+             warmup_percent = global_step_float / warmup_steps_float
+             
+             return tf.cond(
+                 global_step_float < warmup_steps_float,
+                 lambda: self.initial_learning_rate * warmup_percent,
+                 lambda: self.decay_schedule(step - self.warmup_steps)
+             )
+
+    lr_schedule = WarmUpExponentialDecay(
         initial_learning_rate=args.learning_rate,
+        warmup_steps=warmup_steps,
         decay_steps=steps_per_epoch * 5,
-        decay_rate=0.9,
-        staircase=True
+        decay_rate=0.9
     )
     optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
@@ -354,7 +377,7 @@ def train(args):
         grad_norm = tf.linalg.global_norm(grads)
 
         # Apply gradient clipping to prevent exploding gradients
-        grads, _ = tf.clip_by_global_norm(grads, 5.0)
+        grads, _ = tf.clip_by_global_norm(grads, 1.0)
         optimizer.apply_gradients(zip(grads, model.trainable_variables))
         
         return loss, grad_norm, mdn_params
@@ -377,30 +400,23 @@ def train(args):
                     tf.summary.scalar('train/loss', loss, step=global_step)
                     tf.summary.scalar('train/grad_norm', grad_norm, step=global_step)
                     
-                    # Extract and log MDN stats (only occasionaly or lightweight stats)
-                    # We need to split mdn_params again here or inside a func, 
-                    # but doing it here allows logging.
-                    # Note: accessing tensor values in eager mode is fine, but inside tf.function needs care.
-                    # Since we returned mdn_params, we can process a subset here.
+                    # Extract and log MDN stats every step for full resolution
+                    pi, mu1, mu2, sigma1, sigma2, rho, eos_prob = tf.split(
+                        mdn_params,
+                        [
+                            model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
+                            model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
+                            1
+                        ],
+                        axis=-1
+                    )
+                    # Recalculate activations to match loss logic for logging
+                    sigma1 = tf.exp(sigma1) + 1e-4
+                    rho = 0.99 * tf.tanh(rho)
                     
-                    # Log stats every 10 steps to save overhead
-                    if global_step % 10 == 0:
-                         pi, mu1, mu2, sigma1, sigma2, rho, eos_prob = tf.split(
-                            mdn_params,
-                            [
-                                model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
-                                model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
-                                1
-                            ],
-                            axis=-1
-                        )
-                         # Recalculate activations to match loss logic for logging
-                         sigma1 = tf.exp(sigma1) + 1e-4
-                         rho = 0.99 * tf.tanh(rho)
-                         
-                         tf.summary.scalar('stats/sigma_min', tf.reduce_min(sigma1), step=global_step)
-                         tf.summary.scalar('stats/rho_max', tf.reduce_max(tf.abs(rho)), step=global_step)
-                         tf.summary.scalar('stats/rho_mean', tf.reduce_mean(rho), step=global_step)
+                    tf.summary.scalar('stats/sigma_min', tf.reduce_min(sigma1), step=global_step)
+                    tf.summary.scalar('stats/rho_max', tf.reduce_max(tf.abs(rho)), step=global_step)
+                    tf.summary.scalar('stats/rho_mean', tf.reduce_mean(rho), step=global_step)
 
                 if np.isnan(loss):
                     tqdm.write("\nERROR: Loss became NaN! Stopping training immediately to save resources.")
