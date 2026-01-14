@@ -133,7 +133,7 @@ class HandwritingRNN(tf.keras.Model):
         mdn_params = self.output_layer(outputs)
         return mdn_params
 
-    def loss_function(self, y_true, y_pred):
+    def loss_function(self, y_true, y_pred, inputs_len):
         """
         Loss function for the Mixture Density Network.
         """
@@ -182,9 +182,28 @@ class HandwritingRNN(tf.keras.Model):
         # Use from_logits=True for better numerical stability
         loss_eos = tf.keras.losses.binary_crossentropy(
             eos_data, eos_prob, from_logits=True
-        )
+        ) # Shape: (batch_size, time_steps, 1) or (batch_size, time_steps)
         
-        return tf.reduce_mean(loss_stroke + loss_eos)
+        # --- MASKING START ---
+        # Create a mask based on the sequence lengths
+        # inputs_len is shape (batch_size,)
+        # max_len should match y_true.shape[1]
+        max_len = tf.shape(y_true)[1]
+        
+        # We need a mask of shape (batch_size, max_len)
+        mask = tf.sequence_mask(inputs_len, maxlen=max_len, dtype=tf.float32)
+        
+        # loss_stroke is usually (batch_size, time_steps)
+        # loss_eos is usually (batch_size, time_steps) (check dims)
+        if len(loss_eos.shape) == 3:
+             loss_eos = tf.squeeze(loss_eos, axis=-1)
+
+        total_loss = loss_stroke + loss_eos
+        masked_loss = total_loss * mask
+        
+        # Calculate mean over valid steps only
+        return tf.reduce_sum(masked_loss) / tf.reduce_sum(mask)
+        # --- MASKING END ---
 
     @tf.function(reduce_retracing=True)
     def sample(self, text, char_map, initial_bias=1.0):
@@ -371,7 +390,9 @@ def train(args):
         with tf.GradientTape() as tape:
             mdn_params = model((x_batch, c_batch, x_len_batch, c_len_batch), training=True)
             # The target for the loss is the input stroke data, shifted by one step
-            loss = model.loss_function(x_batch[:, 1:, :], mdn_params[:, :-1, :])
+            # We must subtract 1 from x_len_batch because the target sequence is 1 step shorter
+            # due to the shift (we predict t+1 given t).
+            loss = model.loss_function(x_batch[:, 1:, :], mdn_params[:, :-1, :], x_len_batch - 1)
 
         grads = tape.gradient(loss, model.trainable_variables)
         
