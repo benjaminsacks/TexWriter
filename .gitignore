@@ -3,5 +3,6 @@ mathwriting-2024-excerpt
 data/mathwriting-2024-full
 data/processed_latex
 tf_ckpts/
+logs/
 __pycache__/
 *.pyc

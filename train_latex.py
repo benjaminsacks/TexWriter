@@ -20,6 +20,7 @@ import argparse
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
+import datetime
 
 # Add the handwriting-synthesis-master directory to the Python path
 # sys.path.append(os.path.join(os.getcwd(), 'handwriting-synthesis-master'))
@@ -157,7 +158,7 @@ class HandwritingRNN(tf.keras.Model):
         # Apply activations to sigmas and rho
         sigma1 = tf.exp(sigma1) + 1e-4
         sigma2 = tf.exp(sigma2) + 1e-4
-        rho = tf.tanh(rho)
+        rho = 0.99 * tf.tanh(rho)
 
         # Calculate the bivariate Gaussian distribution
         x_data, y_data, eos_data = tf.split(y_true, 3, axis=-1)
@@ -291,6 +292,8 @@ def train(args):
     """Main training routine."""
     # Load data
     x, x_len, c, c_len, char_map = load_data(args.data_dir)
+    if np.isnan(x).any() or np.isnan(c).any():
+         raise ValueError("Input data contains NaNs! Check your data processing.")
     vocab_size = len(char_map)
 
     # Create tf.data.Dataset
@@ -352,7 +355,8 @@ def train(args):
 
     # TensorBoard setup
     arg_log_dir = getattr(args, 'log_dir', 'logs')  # Default to 'logs' if not provided
-    summary_writer = tf.summary.create_file_writer(arg_log_dir)
+    log_dir = os.path.join(arg_log_dir, datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    summary_writer = tf.summary.create_file_writer(log_dir)
 
     # Training loop
     tqdm.write("Starting training...")
