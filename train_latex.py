@@ -389,6 +389,11 @@ def train(args):
     log_dir = os.path.join(arg_log_dir, datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
     summary_writer = tf.summary.create_file_writer(log_dir)
 
+    # CSV Diagnostics logging
+    csv_log_path = 'diagnostics.csv'
+    with open(csv_log_path, 'w') as f:
+        f.write('step,loss,grad_norm,sigma_min,sigma_mean,rho_max,rho_min,rho_mean,eos_mean\n')
+
     # Training loop
     tqdm.write("Starting training...")
     global_step = 0
@@ -397,28 +402,42 @@ def train(args):
             for batch in dataset:
                 loss, grad_norm, mdn_params = train_step(batch)
                 
+                # Extract and log MDN stats every step for full resolution
+                pi, mu1, mu2, sigma1, sigma2, rho, eos_prob = tf.split(
+                    mdn_params,
+                    [
+                        model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
+                        model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
+                        1
+                    ],
+                    axis=-1
+                )
+                # Recalculate activations to match loss logic for logging/constraints
+                sigma1_act = tf.exp(sigma1) + 1e-2
+                rho_act = 0.95 * tf.tanh(rho)
+                eos_act = tf.sigmoid(eos_prob)
+
+                # Calculate specific stats
+                s_sigma_min = tf.reduce_min(sigma1_act)
+                s_sigma_mean = tf.reduce_mean(sigma1_act)
+                s_rho_max = tf.reduce_max(tf.abs(rho_act))
+                s_rho_min = tf.reduce_min(rho_act)
+                s_rho_mean = tf.reduce_mean(rho_act)
+                s_eos_mean = tf.reduce_mean(eos_act)
+
                 # Log to TensorBoard
                 with summary_writer.as_default():
                     tf.summary.scalar('train/loss', loss, step=global_step)
                     tf.summary.scalar('train/grad_norm', grad_norm, step=global_step)
-                    
-                    # Extract and log MDN stats every step for full resolution
-                    pi, mu1, mu2, sigma1, sigma2, rho, eos_prob = tf.split(
-                        mdn_params,
-                        [
-                            model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
-                            model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
-                            1
-                        ],
-                        axis=-1
-                    )
-                    # Recalculate activations to match loss logic for logging
-                    sigma1 = tf.exp(sigma1) + 1e-2
-                    rho = 0.95 * tf.tanh(rho)
-                    
-                    tf.summary.scalar('stats/sigma_min', tf.reduce_min(sigma1), step=global_step)
-                    tf.summary.scalar('stats/rho_max', tf.reduce_max(tf.abs(rho)), step=global_step)
-                    tf.summary.scalar('stats/rho_mean', tf.reduce_mean(rho), step=global_step)
+                    tf.summary.scalar('stats/sigma_min', s_sigma_min, step=global_step)
+                    tf.summary.scalar('stats/rho_max', s_rho_max, step=global_step)
+                    tf.summary.scalar('stats/rho_mean', s_rho_mean, step=global_step)
+                    tf.summary.scalar('stats/eos_mean', s_eos_mean, step=global_step)
+
+                # Log to CSV
+                with open(csv_log_path, 'a') as f:
+                    f.write(f"{global_step},{loss.numpy()},{grad_norm.numpy()},{s_sigma_min.numpy()},{s_sigma_mean.numpy()},{s_rho_max.numpy()},{s_rho_min.numpy()},{s_rho_mean.numpy()},{s_eos_mean.numpy()}\n")
+
 
                 if np.isnan(loss):
                     tqdm.write("\nERROR: Loss became NaN! Stopping training immediately to save resources.")
@@ -444,7 +463,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_weights_path', type=str, default='handwriting_model.weights.h5', help='Path to save final model weights.')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training.')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs.')
-    parser.add_argument('--learning_rate', type=float, default=5e-4, help='Optimizer learning rate.')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Optimizer learning rate.')
     parser.add_argument('--save_every', type=int, default=1, help='Save checkpoint every N epochs.')
     parser.add_argument('--log_dir', type=str, default='logs', help='Directory for TensorBoard logs.')
     # Model Hyperparameters
