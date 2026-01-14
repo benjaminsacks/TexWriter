@@ -178,8 +178,9 @@ class HandwritingRNN(tf.keras.Model):
         loss_stroke = -tf.math.log(tf.maximum(loss_stroke, 1e-10))
 
         # Loss for end-of-stroke prediction
+        # Use from_logits=True for better numerical stability
         loss_eos = tf.keras.losses.binary_crossentropy(
-            eos_data, tf.sigmoid(eos_prob), from_logits=False
+            eos_data, eos_prob, from_logits=True
         )
         
         return tf.reduce_mean(loss_stroke + loss_eos)
@@ -348,10 +349,15 @@ def train(args):
             loss = model.loss_function(x_batch[:, 1:, :], mdn_params[:, :-1, :])
 
         grads = tape.gradient(loss, model.trainable_variables)
+        
+        # Calculate raw gradient norm (before clipping) for diagnostics
+        grad_norm = tf.linalg.global_norm(grads)
+
         # Apply gradient clipping to prevent exploding gradients
         grads, _ = tf.clip_by_global_norm(grads, 5.0)
         optimizer.apply_gradients(zip(grads, model.trainable_variables))
-        return loss
+        
+        return loss, grad_norm, mdn_params
 
     # TensorBoard setup
     arg_log_dir = getattr(args, 'log_dir', 'logs')  # Default to 'logs' if not provided
@@ -364,11 +370,42 @@ def train(args):
     for epoch in range(args.epochs):
         with tqdm(total=len(x) // args.batch_size, desc=f"Epoch {epoch+1}/{args.epochs}") as pbar:
             for batch in dataset:
-                loss = train_step(batch)
+                loss, grad_norm, mdn_params = train_step(batch)
                 
                 # Log to TensorBoard
                 with summary_writer.as_default():
-                    tf.summary.scalar('loss', loss, step=global_step)
+                    tf.summary.scalar('train/loss', loss, step=global_step)
+                    tf.summary.scalar('train/grad_norm', grad_norm, step=global_step)
+                    
+                    # Extract and log MDN stats (only occasionaly or lightweight stats)
+                    # We need to split mdn_params again here or inside a func, 
+                    # but doing it here allows logging.
+                    # Note: accessing tensor values in eager mode is fine, but inside tf.function needs care.
+                    # Since we returned mdn_params, we can process a subset here.
+                    
+                    # Log stats every 10 steps to save overhead
+                    if global_step % 10 == 0:
+                         pi, mu1, mu2, sigma1, sigma2, rho, eos_prob = tf.split(
+                            mdn_params,
+                            [
+                                model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
+                                model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
+                                1
+                            ],
+                            axis=-1
+                        )
+                         # Recalculate activations to match loss logic for logging
+                         sigma1 = tf.exp(sigma1) + 1e-4
+                         rho = 0.99 * tf.tanh(rho)
+                         
+                         tf.summary.scalar('stats/sigma_min', tf.reduce_min(sigma1), step=global_step)
+                         tf.summary.scalar('stats/rho_max', tf.reduce_max(tf.abs(rho)), step=global_step)
+                         tf.summary.scalar('stats/rho_mean', tf.reduce_mean(rho), step=global_step)
+
+                if np.isnan(loss):
+                    tqdm.write("\nERROR: Loss became NaN! Stopping training immediately to save resources.")
+                    sys.exit(1)
+
                 global_step += 1
 
                 pbar.update(1)
