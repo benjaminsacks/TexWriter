@@ -319,7 +319,40 @@ def train(args):
 
     # Create tf.data.Dataset
     dataset = tf.data.Dataset.from_tensor_slices((x, c, x_len, c_len))
-    dataset = dataset.shuffle(buffer_size=len(x)).batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
+    
+    # Bucket by sequence length (x_len is index 2)
+    bucket_boundaries = [200, 400, 600, 800, 1000]
+    
+    # Calculate batch sizes to maintain roughly constant memory usage
+    # (tokens per batch)
+    ref_len = 400
+    budget = args.batch_size * ref_len
+    
+    bucket_batch_sizes = [
+        int(budget / 200),  # 0-200
+        int(budget / 400),  # 200-400
+        int(budget / 600),  # 400-600
+        int(budget / 800),  # 600-800
+        int(budget / 1000), # 800-1000
+        int(budget / 1200)  # 1000+
+    ]
+    
+    # Clip batch sizes to be reasonable
+    bucket_batch_sizes = [max(min(bs, 512), 32) for bs in bucket_batch_sizes]
+    
+    tqdm.write(f"Bucket Batch Sizes: {bucket_batch_sizes}")
+    
+    dataset = dataset.bucket_by_sequence_length(
+        element_length_func=lambda x, c, x_len, c_len: x_len,
+        bucket_boundaries=bucket_boundaries,
+        bucket_batch_sizes=bucket_batch_sizes,
+        padded_shapes=None, # Tensors are already padded, we just want to group them
+        padding_values=None,
+        pad_to_bucket_boundary=False
+    )
+    
+    # Prefetch
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
     # Initialize model, optimizer, and checkpoint manager
     model = HandwritingRNN(
@@ -432,8 +465,8 @@ def train(args):
             for batch in dataset:
                 loss, grad_norm, mdn_params = train_step(batch)
                 
-                # Only log every 50 steps to reduce overhead
-                if global_step % 50 == 0:
+                # Log usage more frequently (every 10 steps)
+                if global_step % 10 == 0:
                     # Extract and log MDN stats
                     pi, mu1, mu2, sigma1, sigma2, rho, eos_prob = tf.split(
                         mdn_params,
