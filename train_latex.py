@@ -534,6 +534,14 @@ def train(args):
                         # If low, attention is blurry. If ~1.0, it's sharp.
                         s_phi_max = tf.reduce_max(phis)
                         s_phi_mean_max = tf.reduce_mean(tf.reduce_max(phis, axis=-1)) # Avg peak sharpness
+                        
+                        # Monitor ground truth sequence lengths
+                        # c_len is already cast to int32 when loading, but let's be safe
+                        # We need to access the c_len from the current batch loop variable.
+                        # Since 'batch' is (x, c, x_len, c_len), index 3 is c_len.
+                        batch_c_len = tf.cast(batch[3], tf.float32)
+                        s_c_len_mean = tf.reduce_mean(batch_c_len)
+                        s_c_len_max = tf.reduce_max(batch_c_len)
 
                         # Log to TensorBoard
                         with summary_writer.as_default():
@@ -547,6 +555,9 @@ def train(args):
                             tf.summary.scalar('attention/kappa_speed', s_kappa_speed, step=global_step)
                             tf.summary.scalar('attention/kappa_max', s_kappa_max, step=global_step)
                             tf.summary.scalar('attention/phi_sharpness', s_phi_mean_max, step=global_step)
+                            # Ground Truth Stats
+                            tf.summary.scalar('stats/c_len_mean', s_c_len_mean, step=global_step)
+                            tf.summary.scalar('stats/c_len_max', s_c_len_max, step=global_step)
 
                         # Log to CSV
                         with open(csv_log_path, 'a') as f:
