@@ -29,7 +29,7 @@ class KerasLSTMAttentionCell(tf.keras.layers.Layer):
     - `phi`: The attention weights applied to the input characters.
     """
 
-    def __init__(self, lstm_size, num_attn_mixture_components, vocab_size, recurrent_dropout=0.0, **kwargs):
+    def __init__(self, lstm_size, num_attn_mixture_components, vocab_size, dropout_rate=0.0, **kwargs):
         """
         Initializes the cell and its internal layers.
 
@@ -38,17 +38,18 @@ class KerasLSTMAttentionCell(tf.keras.layers.Layer):
             num_attn_mixture_components (int): The number of Gaussian mixtures
                 to use for the attention mechanism.
             vocab_size (int): The number of unique characters in the vocabulary.
-            recurrent_dropout (float): Dropout rate for recurrent connections.
+            dropout_rate (float): Dropout rate for outputs.
         """
         super().__init__(**kwargs)
         self.lstm_size = lstm_size
         self.num_attn_mixture_components = num_attn_mixture_components
         self.vocab_size = vocab_size
+        self.dropout_rate = dropout_rate
 
-        # Internal layers of the cell with recurrent dropout
-        self.lstm1 = tf.keras.layers.LSTMCell(self.lstm_size, recurrent_dropout=recurrent_dropout, name='lstm_cell_1')
-        self.lstm2 = tf.keras.layers.LSTMCell(self.lstm_size, recurrent_dropout=recurrent_dropout, name='lstm_cell_2')
-        self.lstm3 = tf.keras.layers.LSTMCell(self.lstm_size, recurrent_dropout=recurrent_dropout, name='lstm_cell_3')
+        # Internal layers of the cell (no internal recurrent dropout to avoid while_loop issues)
+        self.lstm1 = tf.keras.layers.LSTMCell(self.lstm_size, name='lstm_cell_1')
+        self.lstm2 = tf.keras.layers.LSTMCell(self.lstm_size, name='lstm_cell_2')
+        self.lstm3 = tf.keras.layers.LSTMCell(self.lstm_size, name='lstm_cell_3')
         # Dense layer to predict attention parameters (alpha, beta, kappa)
         self.attention_layer = tf.keras.layers.Dense(
             3 * self.num_attn_mixture_components, name='attention_params'
@@ -114,7 +115,7 @@ class KerasLSTMAttentionCell(tf.keras.layers.Layer):
 
         super().build(input_shape)  # Mark this layer as built
 
-    def call(self, inputs, states):
+    def call(self, inputs, states, training=False):
         """
         Performs one timestep calculation for the RNN cell.
 
@@ -124,6 +125,7 @@ class KerasLSTMAttentionCell(tf.keras.layers.Layer):
                 'attention_values': The one-hot encoded character sequence. (batch, char_len, vocab_size)
                 'c_len': The length of each character sequence in the batch. (batch,)
             states (list): The list of state tensors from the previous timestep.
+            training (bool): Whether the model is in training mode.
 
         Returns:
             A tuple (output, new_states):
@@ -159,6 +161,10 @@ class KerasLSTMAttentionCell(tf.keras.layers.Layer):
         # and the current stroke data `x(t)`.
         s1_in = tf.concat([prev_w, timestep_input], axis=1)
         s1_out, [s1_h, s1_c] = self.lstm1(s1_in, states=[h1, c1])
+        
+        # Apply dropout to LSTM output
+        if training and self.dropout_rate > 0:
+            s1_out = tf.nn.dropout(s1_out, rate=self.dropout_rate)
 
         # --- Attention Mechanism ---
         # The attention parameters are predicted by a dense layer based on the
@@ -202,11 +208,19 @@ class KerasLSTMAttentionCell(tf.keras.layers.Layer):
         # Input is the current stroke, output of LSTM 1, and the new context vector.
         s2_in = tf.concat([timestep_input, s1_out, w], axis=1)
         s2_out, [s2_h, s2_c] = self.lstm2(s2_in, states=[h2, c2])
+        
+        # Apply dropout to LSTM output
+        if training and self.dropout_rate > 0:
+            s2_out = tf.nn.dropout(s2_out, rate=self.dropout_rate)
 
         # --- LSTM 3 ---
         # Input is the current stroke, output of LSTM 2, and the new context vector.
         s3_in = tf.concat([timestep_input, s2_out, w], axis=1)
         s3_out, [s3_h, s3_c] = self.lstm3(s3_in, states=[h3, c3])
+        
+        # Apply dropout to LSTM output
+        if training and self.dropout_rate > 0:
+            s3_out = tf.nn.dropout(s3_out, rate=self.dropout_rate)
 
         # --- Assemble New State and Return ---
         new_states = [s1_h, s1_c, s2_h, s2_c, s3_h, s3_c, kappa, w, phi]

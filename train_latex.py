@@ -39,7 +39,7 @@ class HandwritingRNN(tf.keras.Model):
     A sequence-to-sequence model for handwriting generation, adapted for TF2.
     """
     def __init__(self, lstm_size=400, output_mixture_components=20,
-                 attention_mixture_components=10, vocab_size=80, recurrent_dropout=0.0, **kwargs):
+                 attention_mixture_components=10, vocab_size=80, dropout_rate=0.0, **kwargs):
         super().__init__(**kwargs)
         self.lstm_size = lstm_size
         self.output_mixture_components = output_mixture_components
@@ -47,11 +47,13 @@ class HandwritingRNN(tf.keras.Model):
         self.vocab_size = vocab_size
 
         # Custom RNN cell with attention
+        # NOTE: standard recurrent_dropout in Keras LSTMCell causes trace errors in manual while_loops.
+        # We use a custom 'dropout_rate' applied manually in the cell's call() method instead.
         self.cell = KerasLSTMAttentionCell(
             lstm_size=self.lstm_size,
             num_attn_mixture_components=self.attention_mixture_components,
             vocab_size=self.vocab_size,
-            recurrent_dropout=recurrent_dropout
+            dropout_rate=dropout_rate
         )
 
         # Dense layer to predict the parameters of the MDN output
@@ -75,7 +77,7 @@ class HandwritingRNN(tf.keras.Model):
 
 
     @tf.function(reduce_retracing=True)
-    def call(self, inputs):
+    def call(self, inputs, training=False):
         """
         Forward pass of the model.
         """
@@ -115,7 +117,8 @@ class HandwritingRNN(tf.keras.Model):
                 'attention_values': c_one_hot,
                 'c_len': c_len
             }
-            output, new_state_list = self.cell(cell_inputs, list(state))
+            # Pass training flag to cell for dropout
+            output, new_state_list = self.cell(cell_inputs, list(state), training=training)
             outputs = outputs.write(t, output)
             return [t + 1, outputs] + new_state_list
 
@@ -309,28 +312,21 @@ def load_data(data_dir):
 
 # --- Training ---
 
-def train(args):
-    """Main training routine."""
-    # Load data
-    x, x_len, c, c_len, char_map = load_data(args.data_dir)
-    if np.isnan(x).any() or np.isnan(c).any():
-         raise ValueError("Input data contains NaNs! Check your data processing.")
-    vocab_size = len(char_map)
-
-    # Create tf.data.Dataset
+def get_dataset(x, c, x_len, c_len, batch_size):
+    """
+    Creates a tf.data.Dataset with efficient bucketing and batching.
+    """
     dataset = tf.data.Dataset.from_tensor_slices((x, c, x_len, c_len))
 
     # Cast integer inputs to int32 for TensorFlow compatibility
-    # c (chars), x_len (seq len), c_len (char len) are loaded as int8/int16
     dataset = dataset.map(lambda x, c, xl, cl: (x, tf.cast(c, tf.int32), tf.cast(xl, tf.int32), tf.cast(cl, tf.int32)))
     
     # Bucket by sequence length (x_len is index 2)
     bucket_boundaries = [200, 400, 600, 800, 1000]
     
-    # Calculate batch sizes to maintain roughly constant memory usage
-    # (tokens per batch)
+    # Calculate batch sizes to maintain roughly constant memory usage (tokens per batch)
     ref_len = 400
-    budget = args.batch_size * ref_len
+    budget = batch_size * ref_len
     
     bucket_batch_sizes = [
         int(budget / 200),  # 0-200
@@ -343,20 +339,27 @@ def train(args):
     
     # Clip batch sizes to be reasonable
     bucket_batch_sizes = [max(min(bs, 512), 32) for bs in bucket_batch_sizes]
-    
     tqdm.write(f"Bucket Batch Sizes: {bucket_batch_sizes}")
     
     dataset = dataset.bucket_by_sequence_length(
         element_length_func=lambda x, c, x_len, c_len: x_len,
         bucket_boundaries=bucket_boundaries,
         bucket_batch_sizes=bucket_batch_sizes,
-        padded_shapes=None, # Tensors are already padded, we just want to group them
-        padding_values=None,
         pad_to_bucket_boundary=False
     )
     
-    # Prefetch
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    return dataset.prefetch(tf.data.AUTOTUNE)
+
+def train(args):
+    """Main training routine."""
+    # Load data
+    x, x_len, c, c_len, char_map = load_data(args.data_dir)
+    if np.isnan(x).any() or np.isnan(c).any():
+         raise ValueError("Input data contains NaNs! Check your data processing.")
+    vocab_size = len(char_map)
+
+    # Create tf.data.Dataset
+    dataset = get_dataset(x, c, x_len, c_len, args.batch_size)
 
     # Initialize model, optimizer, and checkpoint manager
     model = HandwritingRNN(
@@ -364,7 +367,7 @@ def train(args):
         output_mixture_components=args.output_mixture_components,
         attention_mixture_components=args.attention_mixture_components,
         vocab_size=vocab_size,
-        recurrent_dropout=0.1
+        dropout_rate=args.dropout_rate
     )
 
     # Learning Rate Schedule with Warmup
@@ -465,55 +468,57 @@ def train(args):
     tqdm.write("Starting training...")
     global_step = 0
     for epoch in range(args.epochs):
-        with tqdm(total=len(x) // args.batch_size, desc=f"Epoch {epoch+1}/{args.epochs}") as pbar:
+        with tqdm(total=None, desc=f"Epoch {epoch+1}/{args.epochs}") as pbar:
             for batch in dataset:
                 loss, grad_norm, mdn_params = train_step(batch)
                 
-                # Log usage more frequently (every 10 steps)
+                # Log usage every 10 steps
                 if global_step % 10 == 0:
-                    # Extract and log MDN stats
-                    pi, mu1, mu2, sigma1, sigma2, rho, eos_prob = tf.split(
-                        mdn_params,
-                        [
-                            model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
-                            model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
-                            1
-                        ],
-                        axis=-1
-                    )
-                    # Recalculate activations to match loss logic for logging/constraints
-                    sigma1_act = tf.exp(sigma1) + 1e-2
-                    rho_act = 0.95 * tf.tanh(rho)
-                    eos_act = tf.sigmoid(eos_prob)
+                    # Extract MDN stats safely
+                    try:
+                        pi, mu1, mu2, sigma1, sigma2, rho, eos_prob = tf.split(
+                            mdn_params,
+                            [
+                                model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
+                                model.output_mixture_components, model.output_mixture_components, model.output_mixture_components,
+                                1
+                            ],
+                            axis=-1
+                        )
+                        # Recalculate activations to match loss logic
+                        sigma1_act = tf.exp(sigma1) + 1e-2
+                        rho_act = 0.95 * tf.tanh(rho)
+                        eos_act = tf.sigmoid(eos_prob)
 
-                    # Calculate specific stats
-                    s_sigma_min = tf.reduce_min(sigma1_act)
-                    s_sigma_mean = tf.reduce_mean(sigma1_act)
-                    s_rho_max = tf.reduce_max(tf.abs(rho_act))
-                    s_rho_min = tf.reduce_min(rho_act)
-                    s_rho_mean = tf.reduce_mean(rho_act)
-                    s_eos_mean = tf.reduce_mean(eos_act)
+                        # Calculate specific stats
+                        s_sigma_min = tf.reduce_min(sigma1_act)
+                        s_sigma_mean = tf.reduce_mean(sigma1_act)
+                        s_rho_max = tf.reduce_max(tf.abs(rho_act))
+                        s_rho_min = tf.reduce_min(rho_act)
+                        s_rho_mean = tf.reduce_mean(rho_act)
+                        s_eos_mean = tf.reduce_mean(eos_act)
 
-                    # Log to TensorBoard
-                    with summary_writer.as_default():
-                        tf.summary.scalar('train/loss', loss, step=global_step)
-                        tf.summary.scalar('train/grad_norm', grad_norm, step=global_step)
-                        tf.summary.scalar('stats/sigma_min', s_sigma_min, step=global_step)
-                        tf.summary.scalar('stats/rho_max', s_rho_max, step=global_step)
-                        tf.summary.scalar('stats/rho_mean', s_rho_mean, step=global_step)
-                        tf.summary.scalar('stats/eos_mean', s_eos_mean, step=global_step)
+                        # Log to TensorBoard
+                        with summary_writer.as_default():
+                            tf.summary.scalar('train/loss', loss, step=global_step)
+                            tf.summary.scalar('train/grad_norm', grad_norm, step=global_step)
+                            tf.summary.scalar('stats/sigma_min', s_sigma_min, step=global_step)
+                            tf.summary.scalar('stats/rho_max', s_rho_max, step=global_step)
+                            tf.summary.scalar('stats/rho_mean', s_rho_mean, step=global_step)
+                            tf.summary.scalar('stats/eos_mean', s_eos_mean, step=global_step)
 
-                    # Log to CSV
-                    with open(csv_log_path, 'a') as f:
-                        f.write(f"{global_step},{loss.numpy()},{grad_norm.numpy()},{s_sigma_min.numpy()},{s_sigma_mean.numpy()},{s_rho_max.numpy()},{s_rho_min.numpy()},{s_rho_mean.numpy()},{s_eos_mean.numpy()}\n")
-
+                        # Log to CSV
+                        with open(csv_log_path, 'a') as f:
+                            f.write(f"{global_step},{loss.numpy()},{grad_norm.numpy()},{s_sigma_min.numpy()},{s_sigma_mean.numpy()},{s_rho_max.numpy()},{s_rho_min.numpy()},{s_rho_mean.numpy()},{s_eos_mean.numpy()}\n")
+                    except Exception as e:
+                        # Fallback if split fails due to shape mismatch (unlikely with bucketing but good for safety)
+                        tqdm.write(f"Warning: Logging failed at step {global_step}: {e}")
 
                 if np.isnan(loss):
-                    tqdm.write("\nERROR: Loss became NaN! Stopping training immediately to save resources.")
+                    tqdm.write("\nERROR: Loss became NaN! Stopping training immediately.")
                     sys.exit(1)
 
                 global_step += 1
-
                 pbar.update(1)
                 pbar.set_postfix({'loss': f'{loss.numpy():.4f}'})
 
@@ -539,6 +544,7 @@ if __name__ == '__main__':
     parser.add_argument('--lstm_size', type=int, default=400, help='Size of LSTM layers.')
     parser.add_argument('--output_mixture_components', type=int, default=20, help='Number of GMM output components.')
     parser.add_argument('--attention_mixture_components', type=int, default=10, help='Number of GMM attention components.')
+    parser.add_argument('--dropout_rate', type=float, default=0.1, help='Dropout rate for LSTM outputs (0.0 to disable).')
 
     args = parser.parse_args()
     train(args)
