@@ -93,6 +93,8 @@ class HandwritingRNN(tf.keras.Model):
 
         # Manual unrolling of the RNN using tf.while_loop
         outputs = tf.TensorArray(tf.float32, size=max_stroke_len)
+        kappas = tf.TensorArray(tf.float32, size=max_stroke_len)
+        phis = tf.TensorArray(tf.float32, size=max_stroke_len)
         t = tf.constant(0)
 
         # Define shape invariants for the loop variables
@@ -106,12 +108,14 @@ class HandwritingRNN(tf.keras.Model):
         shape_invariants = [
             tf.TensorShape([]),  # t
             tf.TensorShape(None),  # outputs
+            tf.TensorShape(None),  # kappas
+            tf.TensorShape(None),  # phis
         ] + state_shape_invariants
 
-        def loop_cond(t, outputs, *state):
+        def loop_cond(t, outputs, kappas, phis, *state):
             return tf.less(t, max_stroke_len)
 
-        def loop_body(t, outputs, *state):
+        def loop_body(t, outputs, kappas, phis, *state):
             cell_inputs = {
                 'strokes': x[:, t, :],
                 'attention_values': c_one_hot,
@@ -119,22 +123,37 @@ class HandwritingRNN(tf.keras.Model):
             }
             # Pass training flag to cell for dropout
             output, new_state_list = self.cell(cell_inputs, list(state), training=training)
+            
+            # Extract kappa (index 6) and phi (index 8) from state
+            # state indices: [h1, c1, h2, c2, h3, c3, kappa, w, phi]
+            kappa_t = new_state_list[6]
+            phi_t = new_state_list[8]
+
             outputs = outputs.write(t, output)
-            return [t + 1, outputs] + new_state_list
+            kappas = kappas.write(t, kappa_t)
+            phis = phis.write(t, phi_t)
+            
+            return [t + 1, outputs, kappas, phis] + new_state_list
 
         final_loop_vars = tf.while_loop(
             loop_cond,
             loop_body,
-            loop_vars=[t, outputs] + initial_state,
+            loop_vars=[t, outputs, kappas, phis] + initial_state,
             shape_invariants=shape_invariants
         )
         
         outputs = final_loop_vars[1]
+        kappas = final_loop_vars[2]
+        phis = final_loop_vars[3]
 
-        # Stack the outputs and apply the final dense layer
+        # Stack the outputs and key stats
         outputs = tf.transpose(outputs.stack(), [1, 0, 2])
+        kappas = tf.transpose(kappas.stack(), [1, 0, 2]) # (batch, time, k)
+        phis = tf.transpose(phis.stack(), [1, 0, 2])     # (batch, time, chars)
+        
         mdn_params = self.output_layer(outputs)
-        return mdn_params
+        
+        return mdn_params, kappas, phis
 
     def loss_function(self, y_true, y_pred, inputs_len):
         """
@@ -437,7 +456,7 @@ def train(args):
         # -----------------------------------------------
 
         with tf.GradientTape() as tape:
-            mdn_params = model((x_batch, c_batch, x_len_batch, c_len_batch), training=True)
+            mdn_params, kappas, phis = model((x_batch, c_batch, x_len_batch, c_len_batch), training=True)
             # The target for the loss is the input stroke data, shifted by one step
             # We must subtract 1 from x_len_batch because the target sequence is 1 step shorter
             # due to the shift (we predict t+1 given t).
@@ -452,7 +471,7 @@ def train(args):
         grads, _ = tf.clip_by_global_norm(grads, 1.0)
         optimizer.apply_gradients(zip(grads, model.trainable_variables))
         
-        return loss, grad_norm, mdn_params
+        return loss, grad_norm, mdn_params, kappas, phis
 
     # TensorBoard setup
     arg_log_dir = getattr(args, 'log_dir', 'logs')  # Default to 'logs' if not provided
@@ -470,7 +489,7 @@ def train(args):
     for epoch in range(args.epochs):
         with tqdm(total=None, desc=f"Epoch {epoch+1}/{args.epochs}") as pbar:
             for batch in dataset:
-                loss, grad_norm, mdn_params = train_step(batch)
+                loss, grad_norm, mdn_params, kappas, phis = train_step(batch)
                 
                 # Log usage every 10 steps
                 if global_step % 10 == 0:
@@ -497,6 +516,24 @@ def train(args):
                         s_rho_min = tf.reduce_min(rho_act)
                         s_rho_mean = tf.reduce_mean(rho_act)
                         s_eos_mean = tf.reduce_mean(eos_act)
+                        
+                        # --- Attention Diagnostics ---
+                        # kappas shape: (batch, time, k)
+                        # phis shape: (batch, time, chars)
+                        
+                        # Monitor average movement of kappa (speed)
+                        # We want kappa[t] - kappa[t-1]
+                        kappa_diff = kappas[:, 1:, :] - kappas[:, :-1, :]
+                        s_kappa_speed = tf.reduce_mean(kappa_diff)
+                        
+                        # Monitor if kappa is actually reaching the end of the line
+                        # Just take the max value achieved by kappa across the whole batch
+                        s_kappa_max = tf.reduce_max(kappas)
+                        
+                        # Monitor "sharpness" of attention (max phi value)
+                        # If low, attention is blurry. If ~1.0, it's sharp.
+                        s_phi_max = tf.reduce_max(phis)
+                        s_phi_mean_max = tf.reduce_mean(tf.reduce_max(phis, axis=-1)) # Avg peak sharpness
 
                         # Log to TensorBoard
                         with summary_writer.as_default():
@@ -506,6 +543,10 @@ def train(args):
                             tf.summary.scalar('stats/rho_max', s_rho_max, step=global_step)
                             tf.summary.scalar('stats/rho_mean', s_rho_mean, step=global_step)
                             tf.summary.scalar('stats/eos_mean', s_eos_mean, step=global_step)
+                            # New Attention Stats
+                            tf.summary.scalar('attention/kappa_speed', s_kappa_speed, step=global_step)
+                            tf.summary.scalar('attention/kappa_max', s_kappa_max, step=global_step)
+                            tf.summary.scalar('attention/phi_sharpness', s_phi_mean_max, step=global_step)
 
                         # Log to CSV
                         with open(csv_log_path, 'a') as f:
