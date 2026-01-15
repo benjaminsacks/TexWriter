@@ -175,6 +175,17 @@ class KerasLSTMAttentionCell(tf.keras.layers.Layer):
 
         # Update kappa: The positions of the attention windows move across the text.
         kappa = prev_kappa + kappa / 25.0
+        
+        # --- CLAMPING FIX for "Runaway Attention" ---
+        # Clamp kappa to be at most char_len (plus small margin) to prevent looking at padding.
+        # attention_values_lengths is shape (batch,)
+        # kappa is shape (batch, k)
+        max_k = tf.cast(attention_values_lengths, dtype=tf.float32)
+        max_k = tf.expand_dims(max_k, 1) # (batch, 1)
+        # Allow looking slightly past the end (e.g. +1 char) to see "stop"
+        kappa = tf.minimum(kappa, max_k + 1.0)
+        # ---------------------------------------------
+
         beta = tf.clip_by_value(beta, 1e-2, np.inf) # Prevent beta from becoming too small
 
         # --- Gaussian Mixture Attention Calculation ---
