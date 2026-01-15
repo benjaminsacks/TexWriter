@@ -319,6 +319,10 @@ def train(args):
 
     # Create tf.data.Dataset
     dataset = tf.data.Dataset.from_tensor_slices((x, c, x_len, c_len))
+
+    # Cast integer inputs to int32 for TensorFlow compatibility
+    # c (chars), x_len (seq len), c_len (char len) are loaded as int8/int16
+    dataset = dataset.map(lambda x, c, xl, cl: (x, tf.cast(c, tf.int32), tf.cast(xl, tf.int32), tf.cast(cl, tf.int32)))
     
     # Bucket by sequence length (x_len is index 2)
     bucket_boundaries = [200, 400, 600, 800, 1000]
