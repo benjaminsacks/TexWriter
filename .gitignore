@@ -3,6 +3,8 @@ handwriting-synthesis-master
 mathwriting-2024-excerpt
 data/mathwriting-2024-full
 data/processed_latex
+data/samples
+data/samples_out
 tf_ckpts/
 logs/
 __pycache__/

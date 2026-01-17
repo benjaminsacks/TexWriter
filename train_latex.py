@@ -293,7 +293,26 @@ class HandwritingRNN(tf.keras.Model):
             eos_val = 1.0 / (1.0 + tf.exp(-eos_prob))
             eos = tf.cast(tf.random.uniform((batch_size, 1)) < eos_val, tf.float32)
             
-            end_of_sequence = tf.logical_and(tf.greater(t, 0), tf.reduce_all(eos > 0))
+            # --- SMART STOPPING CONDITION ---
+            # Don't stop unless we have attended to the end of the text.
+            # current state has phi at index 8.
+            # phi shape: (batch_size, char_len)
+            phi_t = new_state_list[8]
+            
+            # Find the character index with max attention
+            attn_idx = tf.argmax(phi_t, axis=1) # (batch_size,)
+            attn_idx = tf.cast(attn_idx, tf.int32)
+            
+            # Check if we are past the last character (allow some margin, e.g. >= len - 1)
+            # c_len is shape (batch_size,) or (1,) here
+            cw_finished = tf.greater_equal(attn_idx, c_len - 1)
+            
+            # Stop only if model predicts EOS AND we have finished reading
+            # Also force stop if we hit max_output_len (handled by loop_cond)
+            is_finished = tf.logical_and(tf.reduce_all(eos > 0), tf.reduce_all(cw_finished))
+            
+            end_of_sequence = tf.logical_and(tf.greater(t, 0), is_finished)
+            # ---------------------------------
 
             current_stroke = tf.concat([x, y, eos], axis=1)
             strokes = strokes.write(t, tf.squeeze(current_stroke))
@@ -593,7 +612,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_every', type=int, default=1, help='Save checkpoint every N epochs.')
     parser.add_argument('--log_dir', type=str, default='logs', help='Directory for TensorBoard logs.')
     # Model Hyperparameters
-    parser.add_argument('--lstm_size', type=int, default=400, help='Size of LSTM layers.')
+    parser.add_argument('--lstm_size', type=int, default=800, help='Size of LSTM layers.')
     parser.add_argument('--output_mixture_components', type=int, default=20, help='Number of GMM output components.')
     parser.add_argument('--attention_mixture_components', type=int, default=10, help='Number of GMM attention components.')
     parser.add_argument('--dropout_rate', type=float, default=0.1, help='Dropout rate for LSTM outputs (0.0 to disable).')
