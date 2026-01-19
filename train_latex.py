@@ -487,7 +487,7 @@ def train(args):
         grad_norm = tf.linalg.global_norm(grads)
 
         # Apply gradient clipping to prevent exploding gradients
-        grads, _ = tf.clip_by_global_norm(grads, 1.0)
+        grads, _ = tf.clip_by_global_norm(grads, args.grad_clip)
         optimizer.apply_gradients(zip(grads, model.trainable_variables))
         
         return loss, grad_norm, mdn_params, kappas, phis
@@ -608,9 +608,10 @@ if __name__ == '__main__':
     parser.add_argument('--model_weights_path', type=str, default='handwriting_model.weights.h5', help='Path to save final model weights.')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training.')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs.')
-    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Optimizer learning rate.')
+    parser.add_argument('--learning_rate', type=float, default=5e-5, help='Optimizer learning rate.')
     parser.add_argument('--save_every', type=int, default=1, help='Save checkpoint every N epochs.')
     parser.add_argument('--log_dir', type=str, default='logs', help='Directory for TensorBoard logs.')
+    parser.add_argument('--grad_clip', type=float, default=10.0, help='Gradient clipping norm.')
     # Model Hyperparameters
     parser.add_argument('--lstm_size', type=int, default=800, help='Size of LSTM layers.')
     parser.add_argument('--output_mixture_components', type=int, default=20, help='Number of GMM output components.')

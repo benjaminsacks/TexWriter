@@ -158,7 +158,7 @@ def inkml_to_png(inkml_path, output_path, color='#284054'):
         plt.close()
 
 
-def load_model(weights_path, char_map_path, lstm_size=400, output_mixture_components=20, attention_mixture_components=10):
+def load_model(weights_path, char_map_path, lstm_size=800, output_mixture_components=20, attention_mixture_components=10):
     """Loads the trained handwriting model."""
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Model weights not found at {weights_path}")
